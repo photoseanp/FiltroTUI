@@ -93,7 +93,7 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App) {
         Page::Run => {
             lines.push(Line::from(format!("Mode:             {}", r.mode.label())));
             lines.push(Line::from(format!("Sampler flow:     {} ml/min", s.flow_ml_min())));
-            lines.push(Line::from(format!("Volume per count: {:.2} ml", s.sample_volume_ml())));
+            lines.push(Line::from(format!("Flow x counting:  {:.2} ml", s.sample_volume_ml())));
             let cycle = (r.counting_time_s + r.interval_s).max(1) as f64;
             match r.mode {
                 RunMode::Initial => lines.push(Line::from(format!(
@@ -171,6 +171,45 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 )));
             }
+        }
+        Page::Analysis => {
+            let a = &s.analysis;
+            let eff_vol = s.effective_volume_ml();
+            lines.push(Line::from("Local analysis settings - not sent to the instrument."));
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!(
+                "Raw counts come from a {:.1} ml sample. Everything else is recalculated to {:.0} ml: N_ref = N_raw x {:.0} / {:.1} = N_raw x {:.3}.",
+                eff_vol,
+                a.ref_volume_ml,
+                a.ref_volume_ml,
+                eff_vol,
+                a.ref_volume_ml / eff_vol.max(1e-9)
+            )));
+            lines.push(Line::from(
+                "Sample volume 0 = flow x counting time from Run Setup. Beta and efficiency are ratios and do not depend on the volume.",
+            ));
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!(
+                "Density {:.2} g/cm3: used for the mass distribution (m on Overview), concentrations in mg/mL.",
+                a.density
+            )));
+            lines.push(Line::from(
+                "Mass = counts per interval x rho x pi/6 x d^3, d = geometric mean of the interval bounds; the last channel is an open tail counted with its lower bound.",
+            ));
+            lines.push(Line::from(""));
+            let cuts: Vec<String> = a
+                .cutoffs
+                .iter()
+                .filter(|c| **c > 0.0)
+                .map(|c| format!("{:.1}", c))
+                .collect();
+            lines.push(Line::from(format!(
+                "Cut-offs (um): {}",
+                if cuts.is_empty() { "none".to_string() } else { cuts.join(", ") }
+            )));
+            lines.push(Line::from(
+                "Vertical lines on the efficiency chart, coloured group labels on the distribution bars. 0 = off.",
+            ));
         }
     }
 

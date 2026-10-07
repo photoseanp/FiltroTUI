@@ -13,13 +13,15 @@ pub struct Prefs {
     pub port: Option<String>,
     pub baud: Option<u32>,
     pub log_x: bool,
-    pub diff_mode: bool,
+    pub log_y: bool,
+    /// 0 = cumulative, 1 = per interval, 2 = mass.
+    pub dist_mode: u8,
     pub auto_sync: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { port: None, baud: None, log_x: false, diff_mode: false, auto_sync: true }
+        Self { port: None, baud: None, log_x: false, log_y: true, dist_mode: 0, auto_sync: true }
     }
 }
 
@@ -67,6 +69,12 @@ pub fn encode(s: &Settings, prefs: &Prefs) -> String {
             format!("{},{:.1}", if c.enabled { 1 } else { 0 }, c.size_um),
         );
     }
+    put("sample_volume", format!("{:.1}", s.analysis.sample_volume_ml));
+    put("ref_volume", format!("{:.1}", s.analysis.ref_volume_ml));
+    put("density", format!("{:.2}", s.analysis.density));
+    for (i, c) in s.analysis.cutoffs.iter().enumerate() {
+        put(&format!("cutoff{}", i + 1), format!("{:.1}", c));
+    }
     if let Some(p) = &prefs.port {
         put("port", p.clone());
     }
@@ -74,7 +82,8 @@ pub fn encode(s: &Settings, prefs: &Prefs) -> String {
         put("baud", b.to_string());
     }
     put("log_x", (prefs.log_x as u8).to_string());
-    put("diff_mode", (prefs.diff_mode as u8).to_string());
+    put("log_y", (prefs.log_y as u8).to_string());
+    put("dist_mode", prefs.dist_mode.to_string());
     put("auto_sync", (prefs.auto_sync as u8).to_string());
     o
 }
@@ -124,10 +133,14 @@ pub fn decode(text: &str, s: &mut Settings) -> Prefs {
                     s.flush.sensor = at(&Sensor::ALL, n as usize, s.flush.sensor);
                 }
             }
+            "sample_volume" => setf(s, Field::SampleVolume, v),
+            "ref_volume" => setf(s, Field::RefVolume, v),
+            "density" => setf(s, Field::Density, v),
             "port" => p.port = Some(v.to_string()),
             "baud" => p.baud = num,
             "log_x" => p.log_x = v == "1",
-            "diff_mode" => p.diff_mode = v == "1",
+            "log_y" => p.log_y = v != "0",
+            "dist_mode" => p.dist_mode = num.unwrap_or(0).min(2) as u8,
             "auto_sync" => p.auto_sync = v != "0",
             _ => {
                 if let Some(rest) = k.strip_prefix("ch") {
@@ -141,6 +154,12 @@ pub fn decode(text: &str, s: &mut Settings) -> Prefs {
                             }
                         }
                     }
+                } else if let Some(rest) = k.strip_prefix("cutoff") {
+                    if let Ok(i) = rest.parse::<usize>() {
+                        if (1..=4).contains(&i) {
+                            setf(s, Field::Cutoff(i - 1), v);
+                        }
+                    }
                 }
             }
         }
@@ -151,5 +170,11 @@ pub fn decode(text: &str, s: &mut Settings) -> Prefs {
 fn set(s: &mut Settings, f: Field, v: Option<u32>) {
     if let Some(n) = v {
         s.set_num(f, n as f64);
+    }
+}
+
+fn setf(s: &mut Settings, f: Field, v: &str) {
+    if let Ok(x) = v.parse::<f64>() {
+        s.set_num(f, x);
     }
 }

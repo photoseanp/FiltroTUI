@@ -70,7 +70,7 @@ pub fn pump_off(downstream: bool) -> String {
     format!("WL{}", if downstream { 1 } else { 0 })
 }
 
-/// Counts of one detection (per selected channel, upstream and downstream).
+/// Raw cumulative counts of one detection (particles >= channel size), per selected channel.
 #[derive(Clone, Debug)]
 pub struct Counts {
     pub up: Vec<u64>,

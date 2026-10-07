@@ -1,4 +1,4 @@
-//! KZD-3A program settings model (Run / Channel / Flush setup).
+//! KZD-3A program settings model (Run / Channel / Flush / Analysis).
 //! Ranges follow the KZD-3A instruction manual (sections 5.3, 5.4, 5.8, Appendix IV).
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -108,11 +108,25 @@ pub struct FlushSetup {
     pub sensor: Sensor,
 }
 
+/// Local analysis parameters (not sent to the instrument).
+#[derive(Clone, Debug)]
+pub struct Analysis {
+    /// Sample volume behind one set of raw counts, ml (0 = flow x counting time).
+    pub sample_volume_ml: f64,
+    /// Reference volume everything is recalculated to, ml.
+    pub ref_volume_ml: f64,
+    /// Particle density for the mass distribution, g/cm3.
+    pub density: f64,
+    /// Cut-off sizes drawn on the charts, um (0 = off).
+    pub cutoffs: [f64; 4],
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub run: RunSetup,
     pub channels: [Channel; 16],
     pub flush: FlushSetup,
+    pub analysis: Analysis,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -120,14 +134,16 @@ pub enum Page {
     Run,
     Channels,
     Flush,
+    Analysis,
 }
 impl Page {
-    pub const ALL: [Page; 3] = [Page::Run, Page::Channels, Page::Flush];
+    pub const ALL: [Page; 4] = [Page::Run, Page::Channels, Page::Flush, Page::Analysis];
     pub fn title(self) -> &'static str {
         match self {
             Page::Run => "Run Setup",
             Page::Channels => "Channel Setup",
             Page::Flush => "Flush Setup",
+            Page::Analysis => "Analysis",
         }
     }
     pub fn index(self) -> usize {
@@ -154,6 +170,10 @@ pub enum Field {
     FlushDir,
     FlushSensor,
     Channel(usize),
+    SampleVolume,
+    RefVolume,
+    Density,
+    Cutoff(usize),
 }
 
 pub enum Kind {
@@ -192,6 +212,12 @@ impl Default for Settings {
                 direction: Direction::Forward,
                 sensor: Sensor::Both,
             },
+            analysis: Analysis {
+                sample_volume_ml: 20.0,
+                ref_volume_ml: 100.0,
+                density: 2.65,
+                cutoffs: [5.0, 10.0, 15.0, 0.0],
+            },
         }
     }
 }
@@ -229,6 +255,15 @@ impl Settings {
             }
             Page::Channels => (0..16).map(Field::Channel).collect(),
             Page::Flush => vec![Field::FlushTime, Field::FlushDir, Field::FlushSensor],
+            Page::Analysis => vec![
+                Field::SampleVolume,
+                Field::RefVolume,
+                Field::Density,
+                Field::Cutoff(0),
+                Field::Cutoff(1),
+                Field::Cutoff(2),
+                Field::Cutoff(3),
+            ],
         }
     }
 
@@ -251,6 +286,10 @@ impl Settings {
             Field::FlushDir => "Running direction".into(),
             Field::FlushSensor => "Sensor".into(),
             Field::Channel(i) => format!("Channel {:02}", i + 1),
+            Field::SampleVolume => "Sample volume".into(),
+            Field::RefVolume => "Reference volume".into(),
+            Field::Density => "Particle density".into(),
+            Field::Cutoff(i) => format!("Cut-off {}", i + 1),
         }
     }
 
@@ -264,6 +303,10 @@ impl Settings {
             Field::FlowLevel => Kind::Num { min: 0.0, max: 5.0, step: 1.0 },
             Field::FlushTime => Kind::Num { min: 1.0, max: 132.0, step: 1.0 },
             Field::Channel(_) => Kind::Num { min: 0.1, max: 999.9, step: 1.0 },
+            Field::SampleVolume => Kind::Num { min: 0.0, max: 1000.0, step: 1.0 },
+            Field::RefVolume => Kind::Num { min: 1.0, max: 10000.0, step: 10.0 },
+            Field::Density => Kind::Num { min: 0.1, max: 20.0, step: 0.05 },
+            Field::Cutoff(_) => Kind::Num { min: 0.0, max: 999.9, step: 1.0 },
             _ => Kind::Choice,
         }
     }
@@ -282,6 +325,10 @@ impl Settings {
             Field::FlowLevel => self.run.flow_level as f64,
             Field::FlushTime => self.flush.time_s as f64,
             Field::Channel(i) => self.channels[i].size_um,
+            Field::SampleVolume => self.analysis.sample_volume_ml,
+            Field::RefVolume => self.analysis.ref_volume_ml,
+            Field::Density => self.analysis.density,
+            Field::Cutoff(i) => self.analysis.cutoffs[i],
             _ => 0.0,
         }
     }
@@ -299,6 +346,10 @@ impl Settings {
                 Field::FlowLevel => self.run.flow_level = u,
                 Field::FlushTime => self.flush.time_s = u,
                 Field::Channel(i) => self.channels[i].size_um = (v * 10.0).round() / 10.0,
+                Field::SampleVolume => self.analysis.sample_volume_ml = (v * 10.0).round() / 10.0,
+                Field::RefVolume => self.analysis.ref_volume_ml = (v * 10.0).round() / 10.0,
+                Field::Density => self.analysis.density = (v * 100.0).round() / 100.0,
+                Field::Cutoff(i) => self.analysis.cutoffs[i] = (v * 10.0).round() / 10.0,
                 _ => {}
             }
         }
@@ -345,6 +396,23 @@ impl Settings {
             Field::Channel(i) => {
                 let c = self.channels[i];
                 format!("[{}] {:.1} um", if c.enabled { "x" } else { " " }, c.size_um)
+            }
+            Field::SampleVolume => {
+                if self.analysis.sample_volume_ml <= 0.0 {
+                    format!("auto ({:.1} ml = flow x time)", self.sample_volume_ml())
+                } else {
+                    format!("{:.1} ml", self.analysis.sample_volume_ml)
+                }
+            }
+            Field::RefVolume => format!("{:.1} ml", self.analysis.ref_volume_ml),
+            Field::Density => format!("{:.2} g/cm3", self.analysis.density),
+            Field::Cutoff(i) => {
+                let c = self.analysis.cutoffs[i];
+                if c <= 0.0 {
+                    "off".to_string()
+                } else {
+                    format!("{:.1} um", c)
+                }
             }
         }
     }
@@ -415,8 +483,18 @@ impl Settings {
         Some((cur, n))
     }
 
+    /// Volume calculated from the sampler flow and the counting time.
     pub fn sample_volume_ml(&self) -> f64 {
         self.flow_ml_min() * self.run.counting_time_s as f64 / 60.0
+    }
+
+    /// Sample volume behind the raw counts: the value set in Analysis, or flow x counting time when it is 0.
+    pub fn effective_volume_ml(&self) -> f64 {
+        if self.analysis.sample_volume_ml > 0.0 {
+            self.analysis.sample_volume_ml
+        } else {
+            self.sample_volume_ml()
+        }
     }
 
     pub fn warnings(&self) -> Vec<String> {

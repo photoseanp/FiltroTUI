@@ -1,4 +1,5 @@
 mod care_center;
+mod detail;
 mod overview;
 mod program_settings;
 
@@ -39,7 +40,12 @@ pub fn draw(f: &mut Frame, app: &App) {
     f.render_widget(tabs, chunks[0]);
 
     match app.tab {
-        Tab::Overview => overview::draw(f, chunks[1], app),
+        Tab::Overview => {
+            overview::draw(f, chunks[1], app);
+            if app.detail_open {
+                detail::draw(f, chunks[1], app);
+            }
+        }
         Tab::ProgramSettings => program_settings::draw(f, chunks[1], app),
         Tab::CareCenter => care_center::draw(f, chunks[1], app),
     }

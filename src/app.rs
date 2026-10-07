@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -55,10 +55,67 @@ pub struct LogLine {
     pub text: String,
 }
 
+/// What the particle distribution bar chart shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DistMode {
+    /// Cumulative counts (particles >= size).
+    Cumulative,
+    /// Counts per size interval.
+    Interval,
+    /// Mass concentration per size interval, spherical particles.
+    Mass,
+}
+
+impl DistMode {
+    pub fn from_u8(n: u8) -> DistMode {
+        match n {
+            1 => DistMode::Interval,
+            2 => DistMode::Mass,
+            _ => DistMode::Cumulative,
+        }
+    }
+
+    pub fn as_u8(self) -> u8 {
+        match self {
+            DistMode::Cumulative => 0,
+            DistMode::Interval => 1,
+            DistMode::Mass => 2,
+        }
+    }
+
+    pub fn next(self) -> DistMode {
+        DistMode::from_u8((self.as_u8() + 1) % 3)
+    }
+}
+
 /// One detection result with the local time it was received.
 pub struct Measurement {
     pub at: String,
+    /// Raw counts exactly as sent by the instrument.
     pub counts: Counts,
+    /// Sample volume behind the raw counts, ml.
+    pub volume_ml: f64,
+}
+
+/// Data shown by the charts and the extended view: one measurement or the average of the marked ones.
+pub struct View {
+    pub title: String,
+    /// Raw counts (averaged when several measurements are marked).
+    pub up: Vec<f64>,
+    pub down: Vec<f64>,
+    /// The same counts recalculated to the reference volume.
+    pub up_n: Vec<f64>,
+    pub down_n: Vec<f64>,
+    /// Sample volume behind the raw counts, ml.
+    pub volume_ml: f64,
+    /// Reference volume, ml.
+    pub ref_ml: f64,
+    /// Number of measurements averaged (1 = a single measurement).
+    pub n_meas: usize,
+    /// Marked measurements skipped because their channel count differs.
+    pub skipped: usize,
+    /// Channel sizes in um (ascending) when known.
+    pub sizes: Option<Vec<f64>>,
 }
 
 pub const BAUDS: [u32; 8] = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200];
@@ -85,12 +142,18 @@ pub struct App {
     pub detecting: bool,
     pub flush_confirm: bool,
     pub results: Vec<Measurement>,
-    /// Selected history row, 0 = newest measurement.
+    /// History cursor, 0 = newest measurement.
     pub hist_sel: usize,
-    /// Logarithmic particle-size axis on the charts.
+    /// Marked measurements (chronological indices) for averaging.
+    pub marks: BTreeSet<usize>,
+    /// Extended view of the selected / averaged measurement.
+    pub detail_open: bool,
+    pub detail_scroll: u16,
+    /// Logarithmic particle-size axis on the efficiency chart.
     pub log_x: bool,
-    /// Particle distribution: false = cumulative counts, true = counts per size interval.
-    pub diff_mode: bool,
+    /// Logarithmic bar height on the distribution chart.
+    pub log_y: bool,
+    pub dist_mode: DistMode,
     /// Number of channels in the last data frame from the instrument.
     pub instrument_channels: Option<usize>,
     /// Keep the number of enabled channels equal to the number the instrument sends.
@@ -141,8 +204,12 @@ impl App {
             flush_confirm: false,
             results: Vec::new(),
             hist_sel: 0,
+            marks: BTreeSet::new(),
+            detail_open: false,
+            detail_scroll: 0,
             log_x: prefs.log_x,
-            diff_mode: prefs.diff_mode,
+            log_y: prefs.log_y,
+            dist_mode: DistMode::from_u8(prefs.dist_mode),
             instrument_channels: None,
             auto_sync: prefs.auto_sync,
             pref_port: prefs.port,
@@ -158,13 +225,106 @@ impl App {
         BAUDS[self.care.baud_idx]
     }
 
-    /// Measurement shown in the charts: the one selected in the history (newest by default).
-    pub fn selected(&self) -> Option<&Measurement> {
+    /// Chronological index of the history cursor.
+    pub fn cursor_index(&self) -> Option<usize> {
         let n = self.results.len();
         if n == 0 {
-            return None;
+            None
+        } else {
+            Some(n - 1 - self.hist_sel.min(n - 1))
         }
-        self.results.get(n - 1 - self.hist_sel.min(n - 1))
+    }
+
+    /// Factor that recalculates counts of `m` to the reference volume.
+    pub fn scale_of(&self, m: &Measurement) -> f64 {
+        if m.volume_ml > 0.0 {
+            self.settings.analysis.ref_volume_ml / m.volume_ml
+        } else {
+            1.0
+        }
+    }
+
+    /// Channel sizes (um, ascending) for `n` channels, when they can be assigned reliably:
+    /// the number of enabled channels must equal `n` (or all 16 channels are reported).
+    pub fn sizes_for(&self, n: usize) -> Option<Vec<f64>> {
+        let enabled = self.settings.enabled_sizes();
+        if enabled.len() == n {
+            Some(enabled)
+        } else if n == 16 {
+            Some(self.settings.all_sizes_sorted())
+        } else {
+            None
+        }
+    }
+
+    /// Data for the charts: the average of the marked measurements, or the one under the cursor.
+    /// Counts are averaged first; beta and efficiency are calculated from the averages (ISO 16889).
+    pub fn view(&self) -> Option<View> {
+        let idx = self.cursor_index()?;
+        let ref_ml = self.settings.analysis.ref_volume_ml;
+
+        let marked: Vec<usize> = self
+            .marks
+            .iter()
+            .copied()
+            .filter(|i| *i < self.results.len())
+            .collect();
+        let (title, sel, skipped): (String, Vec<&Measurement>, usize) = if marked.is_empty() {
+            let m = &self.results[idx];
+            (format!("#{} {}", idx + 1, m.at), vec![m], 0)
+        } else {
+            let last = *marked.last()?;
+            let len = self.results[last].counts.up.len();
+            let sel: Vec<&Measurement> = marked
+                .iter()
+                .map(|i| &self.results[*i])
+                .filter(|m| m.counts.up.len() == len && m.counts.down.len() == len)
+                .collect();
+            let skipped = marked.len() - sel.len();
+            let title = if sel.len() == 1 {
+                format!("#{} {}", last + 1, self.results[last].at)
+            } else {
+                format!("average of {} measurements", sel.len())
+            };
+            (title, sel, skipped)
+        };
+
+        let len = sel[0].counts.up.len();
+        let k = sel.len() as f64;
+        let mut up = vec![0.0; len];
+        let mut down = vec![0.0; len];
+        let mut up_n = vec![0.0; len];
+        let mut down_n = vec![0.0; len];
+        let mut vol = 0.0;
+        for m in &sel {
+            let scale = self.scale_of(m);
+            for i in 0..len {
+                let (u, d) = (m.counts.up[i] as f64, m.counts.down[i] as f64);
+                up[i] += u;
+                down[i] += d;
+                up_n[i] += u * scale;
+                down_n[i] += d * scale;
+            }
+            vol += m.volume_ml;
+        }
+        for i in 0..len {
+            up[i] /= k;
+            down[i] /= k;
+            up_n[i] /= k;
+            down_n[i] /= k;
+        }
+        Some(View {
+            title,
+            up,
+            down,
+            up_n,
+            down_n,
+            volume_ml: vol / k,
+            ref_ml,
+            n_meas: sel.len(),
+            skipped,
+            sizes: self.sizes_for(len),
+        })
     }
 
     fn prefs(&self) -> Prefs {
@@ -172,7 +332,8 @@ impl App {
             port: self.pref_port.clone(),
             baud: Some(self.baud()),
             log_x: self.log_x,
-            diff_mode: self.diff_mode,
+            log_y: self.log_y,
+            dist_mode: self.dist_mode.as_u8(),
             auto_sync: self.auto_sync,
         }
     }
@@ -252,6 +413,9 @@ impl App {
                         "FLUSH: samplers must be disconnected from the system. Press w again to start".into();
                 }
             }
+            Page::Analysis => {
+                self.status = "Analysis settings are used locally and are not sent to the instrument".into();
+            }
         }
     }
 
@@ -305,6 +469,35 @@ impl App {
         if self.tab == Tab::CareCenter && self.care.raw.is_some() {
             self.raw_key(key);
             return;
+        }
+        if self.tab == Tab::Overview && self.detail_open {
+            let max = self.view().map(|v| v.up.len() as u16 + 18).unwrap_or(0);
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('v') => {
+                    self.detail_open = false;
+                    return;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(1);
+                    return;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.detail_scroll = (self.detail_scroll + 1).min(max);
+                    return;
+                }
+                KeyCode::PageUp => {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(10);
+                    return;
+                }
+                KeyCode::PageDown => {
+                    self.detail_scroll = (self.detail_scroll + 10).min(max);
+                    return;
+                }
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('q') => {
+                    self.detail_open = false;
+                }
+                _ => return,
+            }
         }
         match key.code {
             KeyCode::Char('q') => {
@@ -376,7 +569,23 @@ impl App {
             KeyCode::Char('p') => self.send_cmd(protocol::PRINT),
             KeyCode::Char('c') => self.sync_now(),
             KeyCode::Char('l') => self.log_x = !self.log_x,
-            KeyCode::Char('m') => self.diff_mode = !self.diff_mode,
+            KeyCode::Char('y') => self.log_y = !self.log_y,
+            KeyCode::Char('m') => self.dist_mode = self.dist_mode.next(),
+            KeyCode::Char(' ') => {
+                if let Some(i) = self.cursor_index() {
+                    if !self.marks.remove(&i) {
+                        self.marks.insert(i);
+                    }
+                }
+            }
+            KeyCode::Char('a') => self.marks = (0..n).collect(),
+            KeyCode::Char('n') => self.marks.clear(),
+            KeyCode::Enter | KeyCode::Char('v') => {
+                if n > 0 {
+                    self.detail_open = true;
+                    self.detail_scroll = 0;
+                }
+            }
             KeyCode::Down | KeyCode::Char('j') => {
                 if self.hist_sel + 1 < n {
                     self.hist_sel += 1;
@@ -529,7 +738,8 @@ impl App {
                             Ok(c) => {
                                 let n = c.up.len();
                                 let at = chrono::Local::now().format("%H:%M:%S").to_string();
-                                self.results.push(Measurement { at, counts: c });
+                                let volume_ml = self.settings.effective_volume_ml();
+                                self.results.push(Measurement { at, counts: c, volume_ml });
                                 self.hist_sel = 0;
                                 self.status = format!("Data frame #{} received", self.results.len());
                                 self.instrument_channels = Some(n);
