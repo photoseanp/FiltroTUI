@@ -1,4 +1,9 @@
+mod analysis;
 mod app;
+mod link;
+mod persist;
+mod protocol;
+mod settings;
 mod ui;
 
 use std::time::{Duration, Instant};

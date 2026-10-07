@@ -1,6 +1,6 @@
 [package]
 name = "filtrotui"
-version = "0.1.0"
+version = "0.8.0"
 edition = "2021"
 description = "TUI for KZD-3A filter test rig control"
 
@@ -8,6 +8,9 @@ description = "TUI for KZD-3A filter test rig control"
 ratatui = "0.29"
 crossterm = "0.28"
 anyhow = "1"
+serialport = { version = "4", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+dirs = "5"
 
 [profile.release]
 opt-level = 3
