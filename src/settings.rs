@@ -1,12 +1,20 @@
 //! KZD-3A program settings model (Run / Channel / Flush setup).
-//! Ranges follow the KZD-3A instruction manual (sections 5.3, 5.4, 5.8).
+//! Ranges follow the KZD-3A instruction manual (sections 5.3, 5.4, 5.8, Appendix IV).
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-fn cycle<T: Copy + PartialEq>(all: &[T], cur: T, dir: i32) -> T {
+pub fn cycle<T: Copy + PartialEq>(all: &[T], cur: T, dir: i32) -> T {
     let n = all.len() as i32;
     let i = all.iter().position(|x| *x == cur).unwrap_or(0) as i32;
     all[(i + dir).rem_euclid(n) as usize]
+}
+
+pub fn index_of<T: PartialEq>(all: &[T], v: T) -> usize {
+    all.iter().position(|x| *x == v).unwrap_or(0)
+}
+
+pub fn at<T: Copy>(all: &[T], i: usize, default: T) -> T {
+    all.get(i).copied().unwrap_or(default)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,6 +87,7 @@ pub struct RunSetup {
     pub counting_time_s: u32,
     pub interval_s: u32,
     pub test_time_min: u32,
+    pub dilution: u32,
     pub sensor: Sensor,
     pub sample_mode: AutoManual,
     pub detections: u32,
@@ -135,6 +144,7 @@ pub enum Field {
     CountTime,
     Interval,
     TestTime,
+    Dilution,
     Sensor,
     SampleMode,
     Detections,
@@ -169,6 +179,7 @@ impl Default for Settings {
                 counting_time_s: 20,
                 interval_s: 10,
                 test_time_min: 60,
+                dilution: 1,
                 sensor: Sensor::Both,
                 sample_mode: AutoManual::Manual,
                 detections: 1,
@@ -199,6 +210,7 @@ impl Settings {
                             Field::CountTime,
                             Field::Interval,
                             Field::TestTime,
+                            Field::Dilution,
                             Field::PrintMode,
                         ]);
                     }
@@ -229,6 +241,7 @@ impl Settings {
                 _ => "Interval".into(),
             },
             Field::TestTime => "Test time".into(),
+            Field::Dilution => "Dilution ratio".into(),
             Field::Sensor => "Sensor".into(),
             Field::SampleMode => "Sample mode".into(),
             Field::Detections => "Detection frequency".into(),
@@ -246,10 +259,11 @@ impl Settings {
             Field::CountTime => Kind::Num { min: 5.0, max: 60.0, step: 1.0 },
             Field::Interval => Kind::Num { min: 1.0, max: 500.0, step: 1.0 },
             Field::TestTime => Kind::Num { min: 5.0, max: 240.0, step: 5.0 },
+            Field::Dilution => Kind::Num { min: 1.0, max: 10.0, step: 1.0 },
             Field::Detections => Kind::Num { min: 1.0, max: 5.0, step: 1.0 },
             Field::FlowLevel => Kind::Num { min: 0.0, max: 5.0, step: 1.0 },
             Field::FlushTime => Kind::Num { min: 1.0, max: 132.0, step: 1.0 },
-            Field::Channel(_) => Kind::Num { min: 0.1, max: 1000.0, step: 1.0 },
+            Field::Channel(_) => Kind::Num { min: 0.1, max: 999.9, step: 1.0 },
             _ => Kind::Choice,
         }
     }
@@ -263,6 +277,7 @@ impl Settings {
             Field::CountTime => self.run.counting_time_s as f64,
             Field::Interval => self.run.interval_s as f64,
             Field::TestTime => self.run.test_time_min as f64,
+            Field::Dilution => self.run.dilution as f64,
             Field::Detections => self.run.detections as f64,
             Field::FlowLevel => self.run.flow_level as f64,
             Field::FlushTime => self.flush.time_s as f64,
@@ -279,10 +294,11 @@ impl Settings {
                 Field::CountTime => self.run.counting_time_s = u,
                 Field::Interval => self.run.interval_s = u,
                 Field::TestTime => self.run.test_time_min = u,
+                Field::Dilution => self.run.dilution = u,
                 Field::Detections => self.run.detections = u,
                 Field::FlowLevel => self.run.flow_level = u,
                 Field::FlushTime => self.flush.time_s = u,
-                Field::Channel(i) => self.channels[i].size_um = (v * 100.0).round() / 100.0,
+                Field::Channel(i) => self.channels[i].size_um = (v * 10.0).round() / 10.0,
                 _ => {}
             }
         }
@@ -317,6 +333,7 @@ impl Settings {
             Field::CountTime => format!("{} s", self.run.counting_time_s),
             Field::Interval => format!("{} s", self.run.interval_s),
             Field::TestTime => format!("{} min", self.run.test_time_min),
+            Field::Dilution => format!("{}", self.run.dilution),
             Field::Sensor => self.run.sensor.label().into(),
             Field::SampleMode => self.run.sample_mode.label().into(),
             Field::Detections => format!("{}", self.run.detections),
@@ -327,9 +344,13 @@ impl Settings {
             Field::FlushSensor => self.flush.sensor.label().into(),
             Field::Channel(i) => {
                 let c = self.channels[i];
-                format!("[{}] {:.2} um", if c.enabled { "x" } else { " " }, c.size_um)
+                format!("[{}] {:.1} um", if c.enabled { "x" } else { " " }, c.size_um)
             }
         }
+    }
+
+    pub fn enabled_count(&self) -> usize {
+        self.channels.iter().filter(|c| c.enabled).count()
     }
 
     /// Enabled channel sizes sorted ascending (the instrument sorts them itself).
@@ -342,6 +363,56 @@ impl Settings {
             .collect();
         v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         v
+    }
+
+    /// All 16 channel sizes sorted ascending.
+    pub fn all_sizes_sorted(&self) -> Vec<f64> {
+        let mut v: Vec<f64> = self.channels.iter().map(|c| c.size_um).collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    }
+
+    /// Makes the number of enabled channels equal to `n` (the number the instrument sends).
+    /// Too many enabled: the largest sizes are disabled; too few: the smallest disabled sizes
+    /// are enabled. Returns Some((old, new)) when something changed.
+    pub fn sync_enabled_count(&mut self, n: usize) -> Option<(usize, usize)> {
+        let n = n.min(16);
+        let cur = self.enabled_count();
+        if cur == n {
+            return None;
+        }
+        let mut order: Vec<usize> = (0..16).collect();
+        order.sort_by(|&a, &b| {
+            self.channels[a]
+                .size_um
+                .partial_cmp(&self.channels[b].size_um)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.cmp(&b))
+        });
+        if cur > n {
+            let mut extra = cur - n;
+            for &i in order.iter().rev() {
+                if extra == 0 {
+                    break;
+                }
+                if self.channels[i].enabled {
+                    self.channels[i].enabled = false;
+                    extra -= 1;
+                }
+            }
+        } else {
+            let mut need = n - cur;
+            for &i in order.iter() {
+                if need == 0 {
+                    break;
+                }
+                if !self.channels[i].enabled {
+                    self.channels[i].enabled = true;
+                    need -= 1;
+                }
+            }
+        }
+        Some((cur, n))
     }
 
     pub fn sample_volume_ml(&self) -> f64 {
@@ -358,6 +429,9 @@ impl Settings {
             if r.counting_time_s + r.interval_s >= 60 {
                 w.push("INITIAL: counting time + interval should be < 60 s".to_string());
             }
+        }
+        if r.mode == RunMode::Single && r.counting_time_s > 50 {
+            w.push("SINGLE: RS232 protocol lists counting time 5-50 s".to_string());
         }
         let sizes = self.enabled_sizes();
         if sizes.is_empty() {

@@ -23,8 +23,12 @@ pub fn draw(f: &mut Frame, app: &App) {
         .split(f.area());
 
     let titles: Vec<Line> = Tab::ALL.iter().map(|t| Line::from(t.title())).collect();
+    let conn = match &app.care.connected {
+        Some(p) => format!(" FiltroTUI | connected: {} @ {} ", p, app.baud()),
+        None => " FiltroTUI | disconnected ".to_string(),
+    };
     let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::ALL).title(" FiltroTUI "))
+        .block(Block::default().borders(Borders::ALL).title(conn))
         .select(app.tab.index())
         .style(Style::default().fg(Color::Gray))
         .highlight_style(
@@ -40,7 +44,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         Tab::CareCenter => care_center::draw(f, chunks[1], app),
     }
 
-    let hint = Paragraph::new("Tab/Shift+Tab: switch window | q: quit")
-        .style(Style::default().fg(Color::DarkGray));
+    let hint = Paragraph::new(format!(
+        "Tab/Shift+Tab: switch window | q: quit | {}",
+        app.status
+    ))
+    .style(Style::default().fg(Color::DarkGray));
     f.render_widget(hint, chunks[2]);
 }

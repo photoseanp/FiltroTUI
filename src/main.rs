@@ -1,4 +1,7 @@
 mod app;
+mod link;
+mod persist;
+mod protocol;
 mod settings;
 mod ui;
 
