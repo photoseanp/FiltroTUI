@@ -1,4 +1,5 @@
 mod app;
+mod settings;
 mod ui;
 
 use std::time::{Duration, Instant};

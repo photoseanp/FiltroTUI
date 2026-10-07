@@ -1,5 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::settings::{PsState, Settings};
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
     Overview,
@@ -34,6 +36,8 @@ impl Tab {
 pub struct App {
     pub tab: Tab,
     pub should_quit: bool,
+    pub settings: Settings,
+    pub ps: PsState,
 }
 
 impl App {
@@ -41,12 +45,19 @@ impl App {
         Self {
             tab: Tab::Overview,
             should_quit: false,
+            settings: Settings::default(),
+            ps: PsState::new(),
         }
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
+            return;
+        }
+        // While typing a number, all keys go to the input field.
+        if self.tab == Tab::ProgramSettings && self.ps.editing.is_some() {
+            self.ps.handle_key(&mut self.settings, key);
             return;
         }
         match key.code {
@@ -67,7 +78,7 @@ impl App {
 
         match self.tab {
             Tab::Overview => {}
-            Tab::ProgramSettings => {}
+            Tab::ProgramSettings => self.ps.handle_key(&mut self.settings, key),
             Tab::CareCenter => {}
         }
     }
