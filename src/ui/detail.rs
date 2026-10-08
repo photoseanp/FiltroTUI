@@ -35,6 +35,20 @@ fn beta_text(u: f64, d: f64) -> String {
     }
 }
 
+/// Column widths of the main table.
+const W: [usize; 12] = [3, 6, 8, 9, 10, 11, 8, 7, 10, 12, 9, 10];
+
+fn row(cells: [String; 12]) -> String {
+    let mut out = String::new();
+    for (i, c) in cells.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(&format!("{:>w$}", c, w = W[i]));
+    }
+    out
+}
+
 /// Extended view: raw instrument data and everything recalculated to the reference volume.
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let Some(v) = app.view() else { return };
@@ -68,7 +82,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         )),
     ]));
     lines.push(Line::from(
-        "raw = counts from the instrument; per-ref columns, intervals and masses are recalculated to the reference volume; beta and efficiency do not depend on the volume",
+        "raw = counts from the instrument; /ref columns, intervals and masses are recalculated to the reference volume; beta and efficiency do not depend on the volume",
     ));
     if v.skipped > 0 {
         lines.push(Line::from(Span::styled(
@@ -84,11 +98,20 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        format!(
-            "{:>3} {:>6} {:>8} {:>8} {:>10} {:>10} {:>8} {:>7} {:>10} {:>10} {:>10} {:>10}",
-            "ch", "um", "up raw", "down raw", "up >=/ref", "down >=/ref", "beta", "eff %",
-            "up int/ref", "dn int/ref", "up mg/mL", "dn mg/mL"
-        ),
+        row([
+            "ch".into(),
+            "um".into(),
+            "up raw".into(),
+            "down raw".into(),
+            "up >=/ref".into(),
+            "down >=/ref".into(),
+            "beta".into(),
+            "eff %".into(),
+            "up int/ref".into(),
+            "down int/ref".into(),
+            "up mg/mL".into(),
+            "down mg/mL".into(),
+        ]),
         Style::default().add_modifier(Modifier::BOLD),
     )));
     for i in 0..n {
@@ -103,9 +126,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             Some((a, b)) => (format!("{:.3e}", a[i]), format!("{:.3e}", b[i])),
             None => ("-".to_string(), "-".to_string()),
         };
-        lines.push(Line::from(format!(
-            "{:>3} {:>6} {:>8} {:>8} {:>10} {:>10} {:>8} {:>7} {:>10} {:>10} {:>10} {:>10}",
-            i + 1,
+        lines.push(Line::from(row([
+            format!("{}", i + 1),
             size,
             fr(v.up[i]),
             fr(v.down[i]),
@@ -116,8 +138,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             fv(int_up[i]),
             fv(int_down[i]),
             mu,
-            md
-        )));
+            md,
+        ])));
     }
 
     lines.push(Line::from(""));
@@ -208,9 +230,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let max_scroll = lines.len().saturating_sub(inner_h) as u16;
     let scroll = app.detail_scroll.min(max_scroll);
     let title = if avg {
-        " Averaged measurements - Up/Down/PgUp/PgDn scroll, Esc/Enter close "
+        " Averaged measurements - scroll: Up/Down/PgUp/PgDn/wheel, close: Esc/Enter/click "
     } else {
-        " Measurement details - Up/Down/PgUp/PgDn scroll, Esc/Enter close "
+        " Measurement details - scroll: Up/Down/PgUp/PgDn/wheel, close: Esc/Enter/click "
     };
     f.render_widget(
         Paragraph::new(lines)

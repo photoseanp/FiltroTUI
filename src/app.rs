@@ -1,7 +1,11 @@
+use std::cell::RefCell;
 use std::collections::{BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
 
 use crate::link::{Link, LinkCmd, LinkEvent};
 use crate::persist::{self, Prefs};
@@ -118,6 +122,30 @@ pub struct View {
     pub sizes: Option<Vec<f64>>,
 }
 
+/// What a mouse click on a screen region does.
+#[derive(Clone, Copy, Debug)]
+pub enum Target {
+    /// Top-level tab by index.
+    Tab(usize),
+    /// Program Settings page by index.
+    Page(usize),
+    /// Program Settings row by index in the field list.
+    Field(usize),
+    /// History row (0 = newest).
+    History(usize),
+    /// Port row in Care Center.
+    Port(usize),
+    /// Same as pressing this key on the Overview tab.
+    Key(char),
+}
+
+/// A clickable screen region, filled in while drawing.
+#[derive(Clone, Copy, Debug)]
+pub struct Hit {
+    pub rect: Rect,
+    pub target: Target,
+}
+
 pub const BAUDS: [u32; 8] = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200];
 
 pub struct CareState {
@@ -158,12 +186,22 @@ pub struct App {
     pub instrument_channels: Option<usize>,
     /// Keep the number of enabled channels equal to the number the instrument sends.
     pub auto_sync: bool,
+    /// Clickable regions of the last drawn frame.
+    pub hits: RefCell<Vec<Hit>>,
     pref_port: Option<String>,
     saved_blob: String,
     outbox: VecDeque<String>,
     awaiting: Option<(String, Instant)>,
     link: Link,
     started: Instant,
+}
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+fn rect_contains(r: Rect, x: u16, y: u16) -> bool {
+    x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
 }
 
 impl App {
@@ -212,6 +250,7 @@ impl App {
             dist_mode: DistMode::from_u8(prefs.dist_mode),
             instrument_channels: None,
             auto_sync: prefs.auto_sync,
+            hits: RefCell::new(Vec::new()),
             pref_port: prefs.port,
             saved_blob,
             outbox: VecDeque::new(),
@@ -223,6 +262,11 @@ impl App {
 
     pub fn baud(&self) -> u32 {
         BAUDS[self.care.baud_idx]
+    }
+
+    /// Registers a clickable region (called while drawing).
+    pub fn add_hit(&self, rect: Rect, target: Target) {
+        self.hits.borrow_mut().push(Hit { rect, target });
     }
 
     /// Chronological index of the history cursor.
@@ -452,27 +496,31 @@ impl App {
         }
     }
 
-    pub fn on_key(&mut self, key: KeyEvent) {
-        self.handle_key(key);
+    fn detail_max_scroll(&self) -> u16 {
+        self.view().map(|v| v.up.len() as u16 + 18).unwrap_or(0)
+    }
+
+    pub fn on_key(&mut self, ev: KeyEvent) {
+        self.handle_key(ev);
         self.persist();
     }
 
-    fn handle_key(&mut self, key: KeyEvent) {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+    fn handle_key(&mut self, ev: KeyEvent) {
+        if ev.modifiers.contains(KeyModifiers::CONTROL) && ev.code == KeyCode::Char('c') {
             self.should_quit = true;
             return;
         }
         if self.tab == Tab::ProgramSettings && self.ps.editing.is_some() {
-            self.ps.handle_key(&mut self.settings, key);
+            self.ps.handle_key(&mut self.settings, ev);
             return;
         }
         if self.tab == Tab::CareCenter && self.care.raw.is_some() {
-            self.raw_key(key);
+            self.raw_key(ev);
             return;
         }
         if self.tab == Tab::Overview && self.detail_open {
-            let max = self.view().map(|v| v.up.len() as u16 + 18).unwrap_or(0);
-            match key.code {
+            let max = self.detail_max_scroll();
+            match ev.code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('v') => {
                     self.detail_open = false;
                     return;
@@ -499,7 +547,7 @@ impl App {
                 _ => return,
             }
         }
-        match key.code {
+        match ev.code {
             KeyCode::Char('q') => {
                 self.should_quit = true;
                 return;
@@ -518,8 +566,8 @@ impl App {
         }
 
         match self.tab {
-            Tab::Overview => self.overview_key(key),
-            Tab::ProgramSettings => match key.code {
+            Tab::Overview => self.overview_key(ev),
+            Tab::ProgramSettings => match ev.code {
                 KeyCode::Char('w') => self.send_current_page(),
                 KeyCode::Char('a') => {
                     self.flush_confirm = false;
@@ -538,16 +586,16 @@ impl App {
                 }
                 _ => {
                     self.flush_confirm = false;
-                    self.ps.handle_key(&mut self.settings, key);
+                    self.ps.handle_key(&mut self.settings, ev);
                 }
             },
-            Tab::CareCenter => self.care_key(key),
+            Tab::CareCenter => self.care_key(ev),
         }
     }
 
-    fn overview_key(&mut self, key: KeyEvent) {
+    fn overview_key(&mut self, ev: KeyEvent) {
         let n = self.results.len();
-        match key.code {
+        match ev.code {
             KeyCode::Char('u') => {
                 let cmd = if self.pump_up == Some(true) {
                     protocol::pump_off(false)
@@ -600,8 +648,8 @@ impl App {
         }
     }
 
-    fn raw_key(&mut self, key: KeyEvent) {
-        match key.code {
+    fn raw_key(&mut self, ev: KeyEvent) {
+        match ev.code {
             KeyCode::Esc => self.care.raw = None,
             KeyCode::Backspace => {
                 if let Some(b) = self.care.raw.as_mut() {
@@ -625,9 +673,9 @@ impl App {
         }
     }
 
-    fn care_key(&mut self, key: KeyEvent) {
+    fn care_key(&mut self, ev: KeyEvent) {
         let n = self.care.ports.len();
-        match key.code {
+        match ev.code {
             KeyCode::Up if n > 0 => self.care.selected = (self.care.selected + n - 1) % n,
             KeyCode::Down if n > 0 => self.care.selected = (self.care.selected + 1) % n,
             KeyCode::Left => {
@@ -649,12 +697,167 @@ impl App {
             KeyCode::Char('/') => self.care.raw = Some(String::new()),
             _ => {}
         }
-        if matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter) {
+        if matches!(ev.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter) {
             if let Some(p) = self.care.ports.get(self.care.selected).cloned() {
                 self.pref_port = Some(p);
             }
         }
     }
+
+    // ---------------------------------------------------------------- mouse
+
+    pub fn on_mouse(&mut self, m: MouseEvent) {
+        self.handle_mouse(m);
+        self.persist();
+    }
+
+    fn handle_mouse(&mut self, m: MouseEvent) {
+        // While a value is being typed the mouse is ignored.
+        if (self.tab == Tab::ProgramSettings && self.ps.editing.is_some())
+            || (self.tab == Tab::CareCenter && self.care.raw.is_some())
+        {
+            return;
+        }
+        match m.kind {
+            MouseEventKind::Down(btn) if btn == MouseButton::Left || btn == MouseButton::Right => {
+                if self.tab == Tab::Overview && self.detail_open {
+                    self.detail_open = false;
+                    return;
+                }
+                let target = self
+                    .hits
+                    .borrow()
+                    .iter()
+                    .rev()
+                    .find(|h| rect_contains(h.rect, m.column, m.row))
+                    .map(|h| h.target);
+                if let Some(t) = target {
+                    self.click(t, btn == MouseButton::Right);
+                }
+            }
+            MouseEventKind::ScrollUp => self.wheel(-1),
+            MouseEventKind::ScrollDown => self.wheel(1),
+            MouseEventKind::ScrollLeft => self.hscroll(-1),
+            MouseEventKind::ScrollRight => self.hscroll(1),
+            _ => {}
+        }
+    }
+
+    fn click(&mut self, t: Target, right: bool) {
+        match t {
+            Target::Tab(i) => {
+                self.flush_confirm = false;
+                self.tab = Tab::ALL[i % Tab::ALL.len()];
+            }
+            Target::Page(i) => {
+                if self.tab == Tab::ProgramSettings {
+                    self.flush_confirm = false;
+                    self.ps.page = Page::ALL[i % Page::ALL.len()];
+                    self.ps.selected = 0;
+                }
+            }
+            Target::Field(i) => {
+                let nf = self.settings.fields(self.ps.page).len();
+                if i >= nf {
+                    return;
+                }
+                self.flush_confirm = false;
+                if right {
+                    self.ps.selected = i;
+                    self.ps.handle_key(&mut self.settings, key(KeyCode::Char(' ')));
+                } else if self.ps.selected == i {
+                    self.ps.handle_key(&mut self.settings, key(KeyCode::Enter));
+                } else {
+                    self.ps.selected = i;
+                }
+            }
+            Target::History(i) => {
+                let n = self.results.len();
+                if i >= n {
+                    return;
+                }
+                if right {
+                    self.hist_sel = i;
+                    self.overview_key(key(KeyCode::Char(' ')));
+                } else if self.hist_sel == i {
+                    self.overview_key(key(KeyCode::Enter));
+                } else {
+                    self.hist_sel = i;
+                }
+            }
+            Target::Port(i) => {
+                if i >= self.care.ports.len() {
+                    return;
+                }
+                if self.care.selected == i && !right {
+                    self.care_key(key(KeyCode::Enter));
+                } else {
+                    self.care.selected = i;
+                    self.pref_port = self.care.ports.get(i).cloned();
+                }
+            }
+            Target::Key(c) => {
+                if self.tab == Tab::Overview {
+                    self.overview_key(key(KeyCode::Char(c)));
+                }
+            }
+        }
+    }
+
+    fn wheel(&mut self, dir: i32) {
+        match self.tab {
+            Tab::Overview => {
+                if self.detail_open {
+                    let max = self.detail_max_scroll();
+                    self.detail_scroll = if dir > 0 {
+                        (self.detail_scroll + 3).min(max)
+                    } else {
+                        self.detail_scroll.saturating_sub(3)
+                    };
+                } else {
+                    let n = self.results.len();
+                    if dir > 0 {
+                        if self.hist_sel + 1 < n {
+                            self.hist_sel += 1;
+                        }
+                    } else {
+                        self.hist_sel = self.hist_sel.saturating_sub(1);
+                    }
+                }
+            }
+            Tab::ProgramSettings => {
+                let n = self.settings.fields(self.ps.page).len();
+                if n > 0 {
+                    let cur = self.ps.selected.min(n - 1) as i32;
+                    self.ps.selected = (cur + dir).clamp(0, n as i32 - 1) as usize;
+                }
+            }
+            Tab::CareCenter => {
+                let n = self.care.ports.len();
+                if n > 0 {
+                    let cur = self.care.selected.min(n - 1) as i32;
+                    self.care.selected = (cur + dir).clamp(0, n as i32 - 1) as usize;
+                    self.pref_port = self.care.ports.get(self.care.selected).cloned();
+                }
+            }
+        }
+    }
+
+    fn hscroll(&mut self, dir: i32) {
+        match self.tab {
+            Tab::ProgramSettings => {
+                let code = if dir < 0 { KeyCode::Left } else { KeyCode::Right };
+                self.ps.handle_key(&mut self.settings, key(code));
+            }
+            Tab::CareCenter => {
+                let code = if dir < 0 { KeyCode::Left } else { KeyCode::Right };
+                self.care_key(key(code));
+            }
+            Tab::Overview => {}
+        }
+    }
+
+    // ------------------------------------------------------------ instrument
 
     fn reset_session(&mut self) {
         self.outbox.clear();

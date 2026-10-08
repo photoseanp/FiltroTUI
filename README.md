@@ -7,6 +7,17 @@ Cross-platform TUI for the KZD-3A particle counter / filter test rig.
 ## Global keys
 - Tab / Shift+Tab - switch window, q / Ctrl+C - quit
 
+## Mouse
+Mouse capture is on. (To select and copy text from the terminal hold Shift, or Option in macOS Terminal / iTerm2.)
+- Tabs and Program Settings pages: left click.
+- Overview: left click on a history row selects it, a second click opens the extended view, right click marks /
+  unmarks it; wheel moves the history cursor; click on the pump lines, [s] [g] [p] and the channel-sync line runs
+  the same command as the key; click on the title of the efficiency chart (l) or the distribution chart (m), or on
+  the Y axis of the bars (y) toggles that chart option; any click closes the extended view, the wheel scrolls it.
+- Program Settings: left click selects a row, a click on the selected row = Enter (type a number / cycle),
+  right click = Space (toggle channel / cycle / +1); wheel moves the selection; horizontal scroll (trackpad) = Left / Right.
+- Care Center: click a port to select it, click it again to connect; wheel moves the selection.
+
 ## Overview
 - u / d  upstream / downstream sampler pump on/off (WO / WL)
 - s start detection (WD), g suspend (WG), p print (WP), c sync channel count with the instrument
@@ -15,8 +26,9 @@ Cross-platform TUI for the KZD-3A particle counter / filter test rig.
 - With marked measurements the charts and the extended view show the AVERAGE counts of the marked
   measurements (counts are averaged first, beta / efficiency are calculated from the averages, as ISO 16889 requires)
 - Efficiency chart: intermediate labels on the particle-size axis; l - log / linear size axis
-- Particle distribution: grouped bar chart (cyan = upstream, yellow = downstream, group label = channel size).
-  m - mode: cumulative counts / counts per interval / mass (spherical particles); y - log / linear bar height
+- Particle distribution: grouped bar chart with a Y axis (cyan = upstream, yellow = downstream, group label =
+  channel size). m - mode: cumulative counts / counts per interval / mass (spherical particles);
+  y - log / linear bar height
 - Vertical cut-off lines (Program Settings -> Analysis) on the efficiency chart, coloured group labels on the bars
 
 ## Volumes and units

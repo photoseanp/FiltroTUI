@@ -6,16 +6,28 @@ mod protocol;
 mod settings;
 mod ui;
 
+use std::io::stdout;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
+use crossterm::execute;
 
 use app::App;
 
 fn main() -> Result<()> {
     let mut terminal = ratatui::init();
+    let _ = execute!(stdout(), EnableMouseCapture);
+
+    // Make sure a panic does not leave the terminal in mouse-reporting mode.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(stdout(), DisableMouseCapture);
+        prev_hook(info);
+    }));
+
     let result = run(&mut terminal);
+    let _ = execute!(stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
@@ -30,10 +42,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    app.on_key(key);
-                }
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
+                Event::Mouse(m) => app.on_mouse(m),
+                _ => {}
             }
         }
         if last_tick.elapsed() >= tick_rate {

@@ -10,8 +10,9 @@ use ratatui::{
     Frame,
 };
 
+use super::list_offset;
 use crate::analysis::{efficiency, interp_count, interval_counts, mass_per_interval};
-use crate::app::{App, DistMode, View};
+use crate::app::{App, DistMode, Target, View};
 
 const CUT_COLORS: [Color; 4] = [
     Color::LightMagenta,
@@ -19,6 +20,9 @@ const CUT_COLORS: [Color; 4] = [
     Color::LightRed,
     Color::LightBlue,
 ];
+
+/// Width of the Y axis column left of the distribution bars.
+const Y_AXIS_W: u16 = 9;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::default()
@@ -75,6 +79,16 @@ fn pump_span(state: Option<bool>) -> Span<'static> {
     }
 }
 
+/// One-row click region inside a bordered panel; `line` counts from the first inner row.
+fn line_rect(area: Rect, line: u16, x_off: u16, width: u16) -> Rect {
+    Rect {
+        x: area.x + 1 + x_off,
+        y: area.y + 1 + line,
+        width: width.min(area.width.saturating_sub(2 + x_off)),
+        height: 1,
+    }
+}
+
 fn draw_pumps(f: &mut Frame, area: Rect, app: &App) {
     let lines = vec![
         Line::from(vec![Span::raw("[u] Upstream sampler pump:   "), pump_span(app.pump_up)]),
@@ -89,6 +103,9 @@ fn draw_pumps(f: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Sampler pumps ")),
         area,
     );
+    let w = area.width.saturating_sub(2);
+    app.add_hit(line_rect(area, 0, 0, w), Target::Key('u'));
+    app.add_hit(line_rect(area, 1, 0, w), Target::Key('d'));
 }
 
 fn draw_detection(f: &mut Frame, area: Rect, app: &App) {
@@ -132,6 +149,11 @@ fn draw_detection(f: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Detection ")),
         area,
     );
+    // "[s] start (WD)" = 14 chars, "[g] suspend (WG)" = 16, "[p] print (WP)" = 14, two spaces between.
+    app.add_hit(line_rect(area, 2, 0, 14), Target::Key('s'));
+    app.add_hit(line_rect(area, 2, 16, 16), Target::Key('g'));
+    app.add_hit(line_rect(area, 2, 34, 14), Target::Key('p'));
+    app.add_hit(line_rect(area, 3, 0, area.width.saturating_sub(2)), Target::Key('c'));
 }
 
 fn fmt_size(s: f64) -> String {
@@ -244,7 +266,7 @@ fn draw_history(f: &mut Frame, area: Rect, app: &App) {
                 format!("{:.2}", (1.0 - d as f64 / u as f64) * 100.0)
             };
             ListItem::new(format!(
-                "[{}] #{:<3} {} ch{:<2} raw {:>6}/{:<6} per{:.0}ml {:>8.0}/{:<8.0} b {:>6} e {:>5}%",
+                "[{}] #{:<3} {} ch{:<2} raw {:>6}/{:<6} {:.0}ml {:>8.0}/{:<8.0} beta {:>6} eff {:>5}%",
                 if app.marks.contains(&i) { "x" } else { " " },
                 i + 1,
                 m.at,
@@ -260,18 +282,33 @@ fn draw_history(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let title = format!(
-        " History, smallest channel up/down ({} marked) Space mark, a all, n none, Enter details ",
+        " History, smallest channel up/down ({} marked): Space/a/n mark, Enter details ",
         app.marks.len()
     );
+    let visible = area.height.saturating_sub(2) as usize;
+    let sel = app.hist_sel.min(n.saturating_sub(1));
+    let off = list_offset(sel, visible);
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
-    let mut state = ListState::default();
+    let mut state = ListState::default().with_offset(off);
     if n > 0 {
-        state.select(Some(app.hist_sel.min(n - 1)));
+        state.select(Some(sel));
     }
     f.render_stateful_widget(list, area, &mut state);
+
+    for r in 0..visible.min(n.saturating_sub(off)) {
+        app.add_hit(
+            Rect {
+                x: area.x + 1,
+                y: area.y + 1 + r as u16,
+                width: area.width.saturating_sub(2),
+                height: 1,
+            },
+            Target::History(off + r),
+        );
+    }
 }
 
 fn draw_efficiency(f: &mut Frame, area: Rect, app: &App) {
@@ -318,7 +355,7 @@ fn draw_efficiency(f: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     let title = format!(
-        " Separation efficiency {} (l: {} axis) ",
+        " Efficiency {} (click: {} axis) ",
         v.title,
         if app.log_x { "log" } else { "linear" }
     );
@@ -368,9 +405,14 @@ fn draw_efficiency(f: &mut Frame, area: Rect, app: &App) {
                 ]),
         );
     f.render_widget(chart, area);
+    // Click on the title row toggles the size axis (key l).
+    app.add_hit(
+        Rect { x: area.x, y: area.y, width: area.width, height: 1 },
+        Target::Key('l'),
+    );
 }
 
-/// Value text printed on a bar.
+/// Value text printed on a bar / axis tick.
 fn short(v: f64) -> String {
     if v <= 0.0 {
         "0".to_string()
@@ -382,6 +424,14 @@ fn short(v: f64) -> String {
         format!("{:.0}", v)
     } else {
         format!("{:.1}", v)
+    }
+}
+
+fn count_label(k: i32) -> String {
+    match k {
+        i32::MIN..=2 => format!("{}", 10u64.pow(k.max(0) as u32)),
+        3..=5 => format!("{}k", 10u64.pow((k - 3) as u32)),
+        _ => format!("{}M", 10u64.pow((k - 6) as u32)),
     }
 }
 
@@ -403,6 +453,33 @@ fn bar_height(c: f64, is_mass: bool, log: bool, lo: i32, maxv: f64) -> u64 {
     }
 }
 
+/// Y axis labels (value in bar-height units + text) for the distribution bars.
+fn y_ticks(is_mass: bool, log: bool, lo: i32, maxh: u64, maxv: f64) -> Vec<(u64, String)> {
+    let mut t: Vec<(u64, String)> = Vec::new();
+    if log {
+        if is_mass {
+            for k in lo..=(lo + (maxh / 100) as i32 + 1) {
+                let h = ((k - lo) * 100 + 1) as u64;
+                if h <= maxh {
+                    t.push((h, format!("1e{}", k)));
+                }
+            }
+        } else {
+            for k in 0..=((maxh / 100) as i32 + 1) {
+                let h = ((10f64.powi(k) + 1.0).log10() * 100.0) as u64 + 1;
+                if h <= maxh {
+                    t.push((h, count_label(k)));
+                }
+            }
+        }
+    } else {
+        for q in 0..=4u64 {
+            t.push((maxh * q / 4, short(maxv * q as f64 / 4.0)));
+        }
+    }
+    t
+}
+
 fn draw_distribution(f: &mut Frame, area: Rect, app: &App) {
     let Some(v) = app.view() else {
         f.render_widget(
@@ -419,25 +496,28 @@ fn draw_distribution(f: &mut Frame, area: Rect, app: &App) {
     let rho = app.settings.analysis.density;
 
     // Everything is shown for the reference volume (counts) or per mL (mass).
-    let (up_raw, down_raw, is_mass, mode_text) = match app.dist_mode {
+    let (up_raw, down_raw, is_mass, mode_text, unit) = match app.dist_mode {
         DistMode::Cumulative => (
             v.up_n.clone(),
             v.down_n.clone(),
             false,
-            format!("cumulative >= size, per {:.0} ml", v.ref_ml),
+            "cumulative >= d".to_string(),
+            format!("N/{:.0}ml", v.ref_ml),
         ),
         DistMode::Interval => (
             interval_counts(&v.up_n),
             interval_counts(&v.down_n),
             false,
-            format!("counts per interval, per {:.0} ml", v.ref_ml),
+            "per interval".to_string(),
+            format!("N/{:.0}ml", v.ref_ml),
         ),
         DistMode::Mass => match &v.sizes {
             Some(s) => (
                 mass_per_interval(&v.up_n, s, rho, v.ref_ml),
                 mass_per_interval(&v.down_n, s, rho, v.ref_ml),
                 true,
-                format!("mass mg/mL, spheres {:.2} g/cm3", rho),
+                format!("mass, rho {:.2}", rho),
+                "mg/mL".to_string(),
             ),
             None => {
                 f.render_widget(
@@ -476,17 +556,58 @@ fn draw_distribution(f: &mut Frame, area: Rect, app: &App) {
         .collect();
     let maxh = hu.iter().chain(hd.iter()).copied().max().unwrap_or(1).max(1);
 
-    let inner_w = area.width.saturating_sub(2) as usize;
+    // Y axis column on the left, bars on the right.
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(Y_AXIS_W), Constraint::Min(8)])
+        .split(area);
+    let axis_area = cols[0];
+    let chart_area = cols[1];
+
+    let inner_w = chart_area.width.saturating_sub(2) as usize;
     let per_group = (inner_w / n.max(1)).max(3);
     let bw = (per_group.saturating_sub(1) / 2).clamp(1, 7) as u16;
     let group_gap: u16 = if per_group >= 2 * bw as usize + 1 { 1 } else { 0 };
 
-    let title = format!(
-        " Particle distribution, {} {} | cyan up, yellow down | y: {} (m: mode) ",
-        mode_text,
-        v.title,
-        if app.log_y { "log" } else { "linear" }
-    );
+    // Rows available for the bars: chart height minus the borders and the label row.
+    let plot_h = chart_area.height.saturating_sub(3) as usize;
+    let lw = (Y_AXIS_W - 1) as usize;
+    let mut tick_rows: Vec<Option<String>> = vec![None; plot_h];
+    if plot_h > 0 {
+        for (h, text) in y_ticks(is_mass, app.log_y, lo, maxh, maxv) {
+            let r = ((h as f64 / maxh as f64) * plot_h as f64).round() as usize;
+            let r = r.min(plot_h);
+            // The row whose top edge corresponds to the value; zero sits on the bottom row.
+            let t = if r == 0 { plot_h - 1 } else { plot_h - r };
+            if tick_rows[t].is_none() {
+                tick_rows[t] = Some(text);
+            }
+        }
+    }
+    let gray = Style::default().fg(Color::Gray);
+    let mut axis_lines: Vec<Line> = Vec::new();
+    axis_lines.push(Line::from(Span::styled(
+        format!("{:>w$} ", unit.chars().take(lw).collect::<String>(), w = lw),
+        gray,
+    )));
+    for t in 0..plot_h {
+        let text = match &tick_rows[t] {
+            Some(s) => format!("{:>w$}┤", s.chars().take(lw).collect::<String>(), w = lw),
+            None => format!("{:>w$}│", "", w = lw),
+        };
+        axis_lines.push(Line::from(Span::styled(text, gray)));
+    }
+    let x_unit = if v.sizes.is_some() { "um" } else { "ch#" };
+    axis_lines.push(Line::from(Span::styled(format!("{:>w$} ", x_unit, w = lw), gray)));
+    f.render_widget(Paragraph::new(axis_lines), axis_area);
+    // Click on the axis toggles log / linear bar height (key y).
+    app.add_hit(axis_area, Target::Key('y'));
+
+    let title = Line::from(vec![
+        Span::raw(format!(" {} {} ", mode_text, v.title)),
+        Span::styled("\u{25a0} up ", Style::default().fg(Color::Cyan)),
+        Span::styled("\u{25a0} down ", Style::default().fg(Color::Yellow)),
+    ]);
     let mut chart = BarChart::default()
         .block(Block::default().borders(Borders::ALL).title(title))
         .bar_width(bw)
@@ -529,5 +650,10 @@ fn draw_distribution(f: &mut Frame, area: Rect, app: &App) {
                 .bars(&bars),
         );
     }
-    f.render_widget(chart, area);
+    f.render_widget(chart, chart_area);
+    // Click on the chart title row cycles the distribution mode (key m).
+    app.add_hit(
+        Rect { x: chart_area.x, y: chart_area.y, width: chart_area.width, height: 1 },
+        Target::Key('m'),
+    );
 }
