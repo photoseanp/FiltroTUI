@@ -1,5 +1,6 @@
 mod care_center;
 mod detail;
+mod dialogs;
 mod overview;
 mod program_settings;
 
@@ -69,17 +70,34 @@ pub fn draw(f: &mut Frame, app: &App) {
             if app.detail_open {
                 detail::draw(f, chunks[1], app);
             }
+            if app.save_dlg.is_some() {
+                dialogs::draw_save(f, chunks[1], app);
+            }
+            if app.open_dlg.is_some() {
+                dialogs::draw_open(f, chunks[1], app);
+            }
         }
         Tab::ProgramSettings => program_settings::draw(f, chunks[1], app),
         Tab::CareCenter => care_center::draw(f, chunks[1], app),
     }
 
     let tab_hint = match app.tab {
-        Tab::Overview => "m mode | y scale | l axis | Enter details | mouse ok",
+        Tab::Overview => {
+            if app.multi_sum {
+                "m mode | y scale | l axis | t SUM>avg | w save | o open | x delete"
+            } else {
+                "m mode | y scale | l axis | t AVG>sum | w save | o open | x delete"
+            }
+        }
         Tab::ProgramSettings => "mouse: click / right click / wheel",
         Tab::CareCenter => "mouse: click port, again = connect",
     };
+    let hint_style = if app.del_confirm {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     let hint = Paragraph::new(format!("Tab: switch | q: quit | {} | {}", tab_hint, app.status))
-        .style(Style::default().fg(Color::DarkGray));
+        .style(hint_style);
     f.render_widget(hint, chunks[2]);
 }
