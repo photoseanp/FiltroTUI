@@ -6,7 +6,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::App;
+use super::{list_offset, tab_hits};
+use crate::app::{App, Target};
 use crate::protocol;
 use crate::settings::{AutoManual, Field, Page, RunMode};
 
@@ -26,6 +27,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         .select(app.ps.page.index())
         .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
     f.render_widget(pages, rows[0]);
+    let names: Vec<&str> = Page::ALL.iter().map(|p| p.title()).collect();
+    tab_hits(app, rows[0], &names, Target::Page);
 
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -45,7 +48,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 fn draw_form(f: &mut Frame, area: Rect, app: &App) {
     let s = &app.settings;
     let fields = s.fields(app.ps.page);
-    let sel = app.ps.selected.min(fields.len().saturating_sub(1));
+    let n = fields.len();
+    let sel = app.ps.selected.min(n.saturating_sub(1));
+    let visible = area.height.saturating_sub(2) as usize;
+    let off = list_offset(sel, visible);
 
     let items: Vec<ListItem> = fields
         .iter()
@@ -80,8 +86,20 @@ fn draw_form(f: &mut Frame, area: Rect, app: &App) {
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
-    let mut state = ListState::default().with_selected(Some(sel));
+    let mut state = ListState::default().with_offset(off).with_selected(Some(sel));
     f.render_stateful_widget(list, area, &mut state);
+
+    for r in 0..visible.min(n.saturating_sub(off)) {
+        app.add_hit(
+            Rect {
+                x: area.x + 1,
+                y: area.y + 1 + r as u16,
+                width: area.width.saturating_sub(2),
+                height: 1,
+            },
+            Target::Field(off + r),
+        );
+    }
 }
 
 fn draw_summary(f: &mut Frame, area: Rect, app: &App) {

@@ -6,7 +6,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, LogKind};
+use super::list_offset;
+use crate::app::{App, LogKind, Target};
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let cols = Layout::default()
@@ -47,15 +48,32 @@ fn draw_connection(f: &mut Frame, area: Rect, app: &App) {
     } else {
         app.care.ports.iter().map(|p| ListItem::new(p.clone())).collect()
     };
+    let list_area = parts[1];
+    let n = app.care.ports.len();
+    let visible = list_area.height.saturating_sub(2) as usize;
+    let sel = app.care.selected.min(n.saturating_sub(1));
+    let off = list_offset(sel, visible);
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(" Ports "))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
-    let mut st = ListState::default();
-    if !app.care.ports.is_empty() {
-        st.select(Some(app.care.selected));
+    let mut st = ListState::default().with_offset(off);
+    if n > 0 {
+        st.select(Some(sel));
     }
-    f.render_stateful_widget(list, parts[1], &mut st);
+    f.render_stateful_widget(list, list_area, &mut st);
+
+    for r in 0..visible.min(n.saturating_sub(off)) {
+        app.add_hit(
+            Rect {
+                x: list_area.x + 1,
+                y: list_area.y + 1 + r as u16,
+                width: list_area.width.saturating_sub(2),
+                height: 1,
+            },
+            Target::Port(off + r),
+        );
+    }
 }
 
 fn draw_log(f: &mut Frame, area: Rect, app: &App) {

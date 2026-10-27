@@ -35,6 +35,20 @@ fn beta_text(u: f64, d: f64) -> String {
     }
 }
 
+/// Column widths of the main table.
+const W: [usize; 12] = [3, 6, 8, 9, 10, 11, 8, 7, 10, 12, 9, 10];
+
+fn row(cells: [String; 12]) -> String {
+    let mut out = String::new();
+    for (i, c) in cells.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(&format!("{:>w$}", c, w = W[i]));
+    }
+    out
+}
+
 /// Extended view: raw instrument data and everything recalculated to the reference volume.
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let Some(v) = app.view() else { return };
@@ -42,8 +56,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Clear, rect);
 
     let n = v.up.len();
-    let avg = v.n_meas > 1;
-    // Raw counts are integers for a single measurement; averages and recalculated values need decimals.
+    // Raw counts are integers for a single measurement and for a cumulative sum;
+    // averages and recalculated values need decimals.
+    let avg = v.n_meas > 1 && !v.summed;
     let fr = |x: f64| if avg { format!("{:.1}", x) } else { format!("{:.0}", x) };
     let fv = |x: f64| format!("{:.1}", x);
     let rho = app.settings.analysis.density;
@@ -63,16 +78,21 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::from(vec![
         Span::styled(v.title.clone(), Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(format!(
-            "   sample {:.1} ml -> {:.0} ml (x{:.3})   density {:.2} g/cm3   channels {}",
-            v.volume_ml, v.ref_ml, scale, rho, n
+            "   {} {:.1} ml -> {:.0} ml (x{:.3})   density {:.2} g/cm3   channels {}",
+            if v.summed { "total sample" } else { "sample" },
+            v.volume_ml,
+            v.ref_ml,
+            scale,
+            rho,
+            n
         )),
     ]));
     lines.push(Line::from(
-        "raw = counts from the instrument; per-ref columns, intervals and masses are recalculated to the reference volume; beta and efficiency do not depend on the volume",
+        "raw = counts from the instrument (cumulative sum when several measurements are summed, t); /ref columns, intervals and masses are recalculated to the reference volume; beta and efficiency do not depend on the volume",
     ));
     if v.skipped > 0 {
         lines.push(Line::from(Span::styled(
-            format!("{} marked measurement(s) skipped: different channel count", v.skipped),
+            format!("{} marked measurement(s) skipped: different channel count or sizes", v.skipped),
             Style::default().fg(Color::Yellow),
         )));
     }
@@ -84,11 +104,20 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        format!(
-            "{:>3} {:>6} {:>8} {:>8} {:>10} {:>10} {:>8} {:>7} {:>10} {:>10} {:>10} {:>10}",
-            "ch", "um", "up raw", "down raw", "up >=/ref", "down >=/ref", "beta", "eff %",
-            "up int/ref", "dn int/ref", "up mg/mL", "dn mg/mL"
-        ),
+        row([
+            "ch".into(),
+            "um".into(),
+            "up raw".into(),
+            "down raw".into(),
+            "up >=/ref".into(),
+            "down >=/ref".into(),
+            "beta".into(),
+            "eff %".into(),
+            "up int/ref".into(),
+            "down int/ref".into(),
+            "up mg/mL".into(),
+            "down mg/mL".into(),
+        ]),
         Style::default().add_modifier(Modifier::BOLD),
     )));
     for i in 0..n {
@@ -103,9 +132,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             Some((a, b)) => (format!("{:.3e}", a[i]), format!("{:.3e}", b[i])),
             None => ("-".to_string(), "-".to_string()),
         };
-        lines.push(Line::from(format!(
-            "{:>3} {:>6} {:>8} {:>8} {:>10} {:>10} {:>8} {:>7} {:>10} {:>10} {:>10} {:>10}",
-            i + 1,
+        lines.push(Line::from(row([
+            format!("{}", i + 1),
             size,
             fr(v.up[i]),
             fr(v.down[i]),
@@ -116,8 +144,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             fv(int_up[i]),
             fv(int_down[i]),
             mu,
-            md
-        )));
+            md,
+        ])));
     }
 
     lines.push(Line::from(""));
@@ -147,6 +175,15 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             sd * v.ref_ml,
             (su - sd) * v.ref_ml
         )));
+        if v.summed {
+            lines.push(Line::from(format!(
+                "in the total sample volume {:.1} ml: upstream {:.3e} mg | downstream {:.3e} mg | retained {:.3e} mg",
+                v.volume_ml,
+                su * v.volume_ml,
+                sd * v.volume_ml,
+                (su - sd) * v.volume_ml
+            )));
+        }
         let tail = n - 1;
         lines.push(Line::from(format!(
             "last channel (>= {:.1} um) is an open-ended tail counted with its lower bound; one such particle = {:.3e} ug (interval diameter = geometric mean of the bounds, e.g. {:.2} um for channel 1)",
@@ -207,10 +244,12 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let inner_h = rect.height.saturating_sub(2) as usize;
     let max_scroll = lines.len().saturating_sub(inner_h) as u16;
     let scroll = app.detail_scroll.min(max_scroll);
-    let title = if avg {
-        " Averaged measurements - Up/Down/PgUp/PgDn scroll, Esc/Enter close "
+    let title = if v.n_meas > 1 && v.summed {
+        " Summed measurements (t: average) - scroll: Up/Down/PgUp/PgDn/wheel, close: Esc/Enter/click "
+    } else if v.n_meas > 1 {
+        " Averaged measurements (t: sum) - scroll: Up/Down/PgUp/PgDn/wheel, close: Esc/Enter/click "
     } else {
-        " Measurement details - Up/Down/PgUp/PgDn scroll, Esc/Enter close "
+        " Measurement details - scroll: Up/Down/PgUp/PgDn/wheel, close: Esc/Enter/click "
     };
     f.render_widget(
         Paragraph::new(lines)
