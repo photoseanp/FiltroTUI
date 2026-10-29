@@ -192,7 +192,7 @@ pub struct OpenItem {
     pub label: String,
 }
 
-/// "Open saved measurements" dialog.
+/// "Open saved measurements" dialog (several files can be marked and opened at once).
 pub struct OpenDlg {
     pub dir: String,
     /// The folder path is being typed.
@@ -200,6 +200,8 @@ pub struct OpenDlg {
     pub buf: String,
     pub items: Vec<OpenItem>,
     pub sel: usize,
+    /// Marked files (indices into `items`).
+    pub marks: BTreeSet<usize>,
     pub error: Option<String>,
 }
 
@@ -207,7 +209,7 @@ enum OpenAct {
     Nothing,
     Close,
     Rescan,
-    Load(usize),
+    Load(Vec<usize>),
 }
 
 pub struct App {
@@ -973,6 +975,7 @@ impl App {
             buf: dir,
             items: Vec::new(),
             sel: 0,
+            marks: BTreeSet::new(),
             error: None,
         });
         if !editing {
@@ -983,6 +986,7 @@ impl App {
     /// Re-reads the folder of the open dialog; false when the folder cannot be read.
     fn rescan_open(&mut self) -> bool {
         let Some(d) = self.open_dlg.as_mut() else { return false };
+        d.marks.clear();
         match export::list_files(&d.dir) {
             Ok(v) => {
                 d.items = v
@@ -1026,11 +1030,11 @@ impl App {
                         d.buf.pop();
                     }
                     KeyCode::Char(c)
-                        if !c.is_control() && !ev.modifiers.contains(KeyModifiers::CONTROL) =>
+                        if !c.is_control()
+                            && !ev.modifiers.contains(KeyModifiers::CONTROL)
+                            && d.buf.chars().count() < 300 =>
                     {
-                        if d.buf.chars().count() < 300 {
-                            d.buf.push(c);
-                        }
+                        d.buf.push(c);
                     }
                     _ => {}
                 }
@@ -1048,14 +1052,31 @@ impl App {
                     KeyCode::PageDown => d.sel = (d.sel + 8).min(n.saturating_sub(1)),
                     KeyCode::Home => d.sel = 0,
                     KeyCode::End => d.sel = n.saturating_sub(1),
+                    // Space marks / unmarks the file under the cursor and moves down.
+                    KeyCode::Char(' ') if n > 0 => {
+                        let i = d.sel.min(n - 1);
+                        if !d.marks.remove(&i) {
+                            d.marks.insert(i);
+                        }
+                        if i + 1 < n {
+                            d.sel = i + 1;
+                        }
+                    }
+                    KeyCode::Char('a') => d.marks = (0..n).collect(),
+                    KeyCode::Char('n') => d.marks.clear(),
                     KeyCode::Char('f') => {
                         d.editing = true;
                         d.buf = d.dir.clone();
                     }
-                    KeyCode::Enter => {
-                        if n > 0 {
-                            act = OpenAct::Load(d.sel.min(n - 1));
-                        }
+                    // Enter opens all marked files, or the one under the cursor when none is marked.
+                    // The list is newest-first, so it is walked backwards to keep the history chronological.
+                    KeyCode::Enter if n > 0 => {
+                        let idx: Vec<usize> = if d.marks.is_empty() {
+                            vec![d.sel.min(n - 1)]
+                        } else {
+                            d.marks.iter().rev().copied().collect()
+                        };
+                        act = OpenAct::Load(idx);
                     }
                     _ => {}
                 }
@@ -1074,62 +1095,84 @@ impl App {
                     }
                 }
             }
-            OpenAct::Load(i) => {
-                let path = self
-                    .open_dlg
-                    .as_ref()
-                    .and_then(|d| d.items.get(i))
-                    .map(|it| it.path.clone());
-                if let Some(p) = path {
-                    self.load_file(p);
+            OpenAct::Load(idx) => {
+                let paths: Vec<PathBuf> = match self.open_dlg.as_ref() {
+                    Some(d) => idx
+                        .iter()
+                        .filter_map(|i| d.items.get(*i))
+                        .map(|it| it.path.clone())
+                        .collect(),
+                    None => Vec::new(),
+                };
+                if !paths.is_empty() {
+                    self.load_files(paths);
                 }
             }
         }
     }
 
-    /// Appends the measurements of a saved file to the history and marks them.
-    fn load_file(&mut self, path: PathBuf) {
-        let parsed = match std::fs::read_to_string(&path) {
-            Ok(text) => export::parse_txt(&text),
-            Err(e) => Err(e.to_string()),
-        };
-        match parsed {
-            Ok(l) => {
-                let stem = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("file")
-                    .to_string();
-                let tag: String = stem.chars().take(14).collect();
-                let first = self.results.len();
-                let count = l.items.len();
-                for it in l.items {
-                    let at = format!("{} [{}]", it.at, tag);
-                    self.results.push(Measurement {
-                        at,
-                        counts: Counts { up: it.up, down: it.down },
-                        volume_ml: it.volume_ml,
-                        sizes: it.sizes,
-                    });
+    /// Appends the measurements of the saved files to the history (in the given order) and marks them.
+    fn load_files(&mut self, paths: Vec<PathBuf>) {
+        let first = self.results.len();
+        let mut files_ok = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+        let mut last_name = String::new();
+        let mut last_notes = String::new();
+
+        for path in &paths {
+            let parsed = match std::fs::read_to_string(path) {
+                Ok(text) => export::parse_txt(&text),
+                Err(e) => Err(e.to_string()),
+            };
+            match parsed {
+                Ok(l) => {
+                    let stem = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("file")
+                        .to_string();
+                    let tag: String = stem.chars().take(14).collect();
+                    for it in l.items {
+                        let at = format!("{} [{}]", it.at, tag);
+                        self.results.push(Measurement {
+                            at,
+                            counts: Counts { up: it.up, down: it.down },
+                            volume_ml: it.volume_ml,
+                            sizes: it.sizes,
+                        });
+                    }
+                    files_ok += 1;
+                    last_name = l.name;
+                    last_notes = l.notes;
                 }
-                self.marks = (first..self.results.len()).collect();
-                self.hist_sel = 0;
-                self.open_dlg = None;
-                self.status = if l.notes.is_empty() {
-                    format!("Opened {}: {} measurement(s), marked", l.name, count)
-                } else {
-                    format!(
-                        "Opened {}: {} measurement(s), marked. Notes: {}",
-                        l.name, count, l.notes
-                    )
-                };
-            }
-            Err(e) => {
-                if let Some(d) = self.open_dlg.as_mut() {
-                    d.error = Some(format!("{}: {}", file_name(&path), e));
-                }
+                Err(e) => errors.push(format!("{}: {}", file_name(path), e)),
             }
         }
+
+        if files_ok == 0 {
+            if let Some(d) = self.open_dlg.as_mut() {
+                d.error = Some(errors.join("; "));
+            }
+            return;
+        }
+
+        let added = self.results.len() - first;
+        self.marks = (first..self.results.len()).collect();
+        self.hist_sel = 0;
+        self.open_dlg = None;
+        let mut msg = if files_ok == 1 {
+            let mut m = format!("Opened {}: {} measurement(s), marked", last_name, added);
+            if !last_notes.is_empty() {
+                m.push_str(&format!(". Notes: {}", last_notes));
+            }
+            m
+        } else {
+            format!("Opened {} files: {} measurements, marked", files_ok, added)
+        };
+        if !errors.is_empty() {
+            msg.push_str(&format!(" | {} file(s) failed: {}", errors.len(), errors.join("; ")));
+        }
+        self.status = msg;
     }
 
     fn raw_key(&mut self, ev: KeyEvent) {

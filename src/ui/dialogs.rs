@@ -117,7 +117,11 @@ pub fn draw_open(f: &mut Frame, area: Rect, app: &App) {
         head.push(Line::from("Type the folder path, Enter: confirm, Esc: cancel"));
     } else {
         head.push(Line::from(format!("Folder: {}", d.dir)));
-        head.push(Line::from(format!("{} file(s)", d.items.len())));
+        head.push(Line::from(format!(
+            "{} file(s), {} marked (Enter opens the marked files, or the current one if none is marked)",
+            d.items.len(),
+            d.marks.len()
+        )));
     }
     if let Some(e) = &d.error {
         head.push(Line::from(Span::styled(
@@ -130,7 +134,14 @@ pub fn draw_open(f: &mut Frame, area: Rect, app: &App) {
     let items: Vec<ListItem> = d
         .items
         .iter()
-        .map(|i| ListItem::new(i.label.clone()))
+        .enumerate()
+        .map(|(i, it)| {
+            ListItem::new(format!(
+                "[{}] {}",
+                if d.marks.contains(&i) { "x" } else { " " },
+                it.label
+            ))
+        })
         .collect();
     let n = items.len();
     let visible = parts[1].height as usize;
@@ -146,7 +157,7 @@ pub fn draw_open(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(list, parts[1], &mut st);
 
     f.render_widget(
-        Paragraph::new("Up/Down: select | Enter: open (marks the loaded measurements) | f: change folder | Esc: close")
+        Paragraph::new("Up/Down: move | Space: mark | a: all | n: none | Enter: open | f: folder | Esc: close")
             .style(Style::default().fg(Color::DarkGray)),
         parts[2],
     );
